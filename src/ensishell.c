@@ -105,7 +105,7 @@ int main() {
 				default:
 
 					if( !l->bg ){ 
-						if (wait(NULL) == -1) {
+						if (waitpid(pid, NULL, 0) == -1) {
 							perror("wait :");
 							exit(EXIT_FAILURE);
 						}

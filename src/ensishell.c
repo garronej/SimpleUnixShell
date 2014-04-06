@@ -108,21 +108,16 @@ pid_t create_process(void){
 	return pid;
 }
 
+
 int create_and_exec_process(struct cmdline *l, int index) {
 
 	if(strcmp(l->seq[index][0], "jobs") == 0){ ldc_affiche(&liste); return EXIT_SUCCESS;}
 	if(strcmp(l->seq[index][0], "exit") == 0) { ldc_libere(&liste); exit(EXIT_SUCCESS);}
 
-	// on remplace les jokers à l'aide du glob
 	glob_t gl; 
-	glob(l->seq[index][0], GLOB_NOCHECK|GLOB_NOMAGIC, 0, &gl); 
-	// pour chaque argument de la commande
-	for(int k= 1; l->seq[index][k] !=0; k++) { 
-		// on traite les jokers
-		glob(l->seq[index][k], GLOB_NOCHECK|GLOB_NOMAGIC|GLOB_APPEND
-				| GLOB_BRACE|GLOB_TILDE, 0, &gl);
-	}
-	// la nouvelle commande est le resultat du glob
+	glob(l->seq[index][0], 2064, 0, &gl); 
+	//GLOB_NOCHECK|GLOB_NOMAGIC|GLOB_APPEND|GLOB_BRACE|GLOB_TILDE
+	for(int k= 1; l->seq[index][k] !=0; k++) glob(l->seq[index][k], 7216, 0, &gl);
 	char** commande = gl.gl_pathv;
 
 	// on crée un tuyau
@@ -143,11 +138,11 @@ int create_and_exec_process(struct cmdline *l, int index) {
 				// on ouvre le fichier et on stocke son descripteur dans l'extremite a lire (entree) du tuyau
 				tuyau[0] = open(l->in, O_RDONLY, 0);
 
-				if(tuyau[0]){
+				if(tuyau[0] == -1){
 					perror("open()");
 					return EXIT_FAILURE;
 				}
-				
+
 				// on relie à l'entrée standard
 				dup2(tuyau[0], STDIN_FILENO);		
 			}else dup2(sortie_prec, STDIN_FILENO);

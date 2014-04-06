@@ -111,56 +111,40 @@ pid_t create_process(void){
 
 int create_and_exec_process(struct cmdline *l, int index) {
 
+	int fd;
+
 	if(strcmp(l->seq[index][0], "jobs") == 0){ ldc_affiche(&liste); return EXIT_SUCCESS;}
 	if(strcmp(l->seq[index][0], "exit") == 0) { ldc_libere(&liste); exit(EXIT_SUCCESS);}
 
 	glob_t gl; 
 	glob(l->seq[index][0], 2064, 0, &gl); 
-	//GLOB_NOCHECK|GLOB_NOMAGIC|GLOB_APPEND|GLOB_BRACE|GLOB_TILDE
 	for(int k= 1; l->seq[index][k] !=0; k++) glob(l->seq[index][k], 7216, 0, &gl);
 	char** commande = gl.gl_pathv;
 
-	// on crée un tuyau
 	pipe(tuyau);
 
-	// on crée un processus
 	pid_t pid = create_process();
 	switch(pid){
-		// cas d'erreur
 		case -1:
 			ldc_libere(&liste);
 			exit(EXIT_FAILURE);
 			break;
-			// cas du fils
-		case 0:
-			// si on a un fichier en entrée 
+		case 0: //fils
 			if (index == 0 && l->in) {
-				// on ouvre le fichier et on stocke son descripteur dans l'extremite a lire (entree) du tuyau
-				tuyau[0] = open(l->in, O_RDONLY, 0);
 
-				if(tuyau[0] == -1){
-					perror("open()");
-					return EXIT_FAILURE;
-				}
+				fd = open(l->in, O_RDONLY, 0);
+				if(fd == -1){ perror("open()"); return EXIT_FAILURE; }
+				dup2(fd, STDIN_FILENO);		
 
-				// on relie à l'entrée standard
-				dup2(tuyau[0], STDIN_FILENO);		
 			}else dup2(sortie_prec, STDIN_FILENO);
 
-			// s'il y a une commande après
-			if (l->seq[index+1] != 0) {
-				// on connecte l'extremité a ecrire du tuyau (sortie) à la sortie standard
-				dup2(tuyau[1], STDOUT_FILENO);
-			} else {
-				// si c'est la derniere commande et qu'il y a une redirection de fichier
-				if(l->out) {
-					// on crée le fichier et on associe son descripteur à la sortie standard
-					tuyau[1] = open(l->out, O_CREAT|O_WRONLY| O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP |  S_IWGRP |S_IROTH | S_IWOTH);
-					dup2(tuyau[1], STDOUT_FILENO);
-				}
+			if (l->seq[index+1] != 0) { close(tuyau[0]); dup2(tuyau[1], STDOUT_FILENO);}
+			else if( l->out){
+
+				fd = open(l->out, O_CREAT|O_WRONLY| O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP |  S_IWGRP |S_IROTH | S_IWOTH);
+				if(fd == -1){ perror("open()"); return EXIT_FAILURE; }
+				dup2(fd, STDOUT_FILENO);
 			}
-			// on ferme l'extremite a lire
-			close(tuyau[0]);
 
 			if ( execvp(commande[0], commande) == -1) {
 				printf("%s : commande introuvable\n", l->seq[index][0]);
@@ -168,26 +152,22 @@ int create_and_exec_process(struct cmdline *l, int index) {
 				exit(EXIT_FAILURE);
 			}
 			break;
-		default: // cas du père
+		default: //père
 
-			// on ferme l'extremite a ecrire
 			close(tuyau[1]);
-			// on stocke la sortie de la commande
 			sortie_prec = tuyau[0];
 
-			// si la commande n'est pas en background et si c'est la derniere commande
 			if (!l->bg && l->seq[index+1] == NULL){
 				if (waitpid(pid, NULL, 0) == -1) {
 					perror("wait :");
 					ldc_libere(&liste);
 					exit(EXIT_FAILURE);
 				}
-			}else if (l->bg) ldc_insere_fin(&liste, pid, l->seq[index]);
+			}else if(l->bg) ldc_insere_fin(&liste, pid, l->seq[index]);
 
 			break;
 	}
 	globfree(&gl);
-
 	return EXIT_SUCCESS;
 }
 
@@ -198,32 +178,32 @@ int create_and_exec_process(struct cmdline *l, int index) {
 
 
 struct T_cellule *ldc_cree(void) {
-    return NULL;
+	return NULL;
 }
 
 int ldc_taille( struct T_cellule *liste) {
-    if (liste == NULL) return(0);
+	if (liste == NULL) return(0);
 
-    struct T_cellule *liste_cour = liste;
-    int i = 0;
-    do {
-        liste_cour = (*liste_cour).suiv;
-        i++;
-    } while (liste_cour != liste);
-    return(i);
+	struct T_cellule *liste_cour = liste;
+	int i = 0;
+	do {
+		liste_cour = (*liste_cour).suiv;
+		i++;
+	} while (liste_cour != liste);
+	return(i);
 }
 
 void ldc_libere(struct T_cellule **pl) {
-    if (ldc_taille(*pl) == 0) return; 
-    struct T_cellule *liste_cour=*pl;
-    struct T_cellule *liste_suiv=(*liste_cour).suiv;
-    do {
-        free(liste_cour->cmd);
-	free(liste_cour);
-	liste_cour=liste_suiv;
-	liste_suiv=(*liste_cour).suiv;
-    } while (liste_cour != *pl);
-    *pl = ldc_cree();
+	if (ldc_taille(*pl) == 0) return; 
+	struct T_cellule *liste_cour=*pl;
+	struct T_cellule *liste_suiv=(*liste_cour).suiv;
+	do {
+		free(liste_cour->cmd);
+		free(liste_cour);
+		liste_cour=liste_suiv;
+		liste_suiv=(*liste_cour).suiv;
+	} while (liste_cour != *pl);
+	*pl = ldc_cree();
 }
 
 void ldc_affiche( struct T_cellule **pl ){

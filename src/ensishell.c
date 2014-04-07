@@ -19,6 +19,7 @@
 #include <string.h> /* pour strcmp*/
 #include <glob.h> /* Pour glob */
 #include <fcntl.h> /* Pour open */
+#include <sys/time.h> /* Pour gettimeofday */
 
 
 #ifndef VARIANTE
@@ -26,6 +27,7 @@
 #endif
 
 #define TRUE 1
+
 
 //  La fonction create_process duplique le processus appelant et retourne
 //    le PID du processus fils ainsi créé 
@@ -35,29 +37,46 @@ pid_t create_process(void);
 int create_and_exec_process(struct cmdline *l, int index);
 
 
-// tuyau courant
+// Tuyaux permétant au père et au fils de communiquer.
 int tuyau[2];
 
-// descripteur de fichier correspondant à la sortie du tuyau precedent
+// descripteur de fichier correspondant à la sortie de 
+// la commande avant le pipe.
 int sortie_prec = STDIN_FILENO; 
 
 
-//ATS list doublement chainée pout gerer les proc en bg
-struct T_cellule
-{
-    pid_t pid;
-    char *cmd; /* Commande entrée*/
-    struct T_cellule *suiv; 
-    struct T_cellule *prec;
+//list doublement chainée pout gerer les proc en bg
+//Le tas a ete adapter pour les besoint de l'exercice.
+struct T_cellule{
+	pid_t pid; 
+	char *cmd; /* Commande entrée*/
+	int ended; /* vrais si le proc est términé. */
+	struct timeval start; /* Moment du lancement du proc */
+	int status; /* Si il c'est tesminé, avec quelle status. */
+	struct T_cellule *suiv; 
+	struct T_cellule *prec;
+
 };
 
 int ldc_taille( struct T_cellule *liste);
 struct T_cellule *ldc_cree();
 void ldc_libere(struct T_cellule **pl);
-void ldc_affiche( struct T_cellule **pl );
-void ldc_insere_fin( struct T_cellule **pliste, pid_t pid, char **cmd);
 void ldc_supprime( struct T_cellule **pl, struct T_cellule *ele);
 
+//Affiche la liste de processus avec leurs status et suprime ceux qui 
+//sont terminer.
+void ldc_affiche( struct T_cellule **pl );
+
+void ldc_insere_fin( struct T_cellule **pliste, pid_t pid, char **cmd, struct timeval start);
+
+//Recherche un processus avec le pid passer en entré et renvoi la cellule
+//correspondante.
+struct T_cellule *ldc_find( struct T_cellule *pl, pid_t pid);
+
+
+
+
+void hdl (int sig, siginfo_t *siginfo, void *context);
 
 void ldc_afficheDebug( struct T_cellule *liste );
 
@@ -65,17 +84,42 @@ void ldc_afficheDebug( struct T_cellule *liste );
 //Liste des processus.
 struct T_cellule *liste;
 
+char *bgEndReport = NULL;
+
+char *prompt = "\033[01;30mensishell \033[00m>";
 
 int main(){
 	printf("Variante %d: %s\n", VARIANTE, VARIANTE_STRING);
 
 	struct cmdline *l;
+	prompt = "\033[01;30mensishell \033[00m>" ;
+
 	liste = ldc_cree();
-	char *prompt = "ensiPrompt>";
+
+	struct sigaction act;
+	memset (&act, '\0', sizeof(act));
+	/* Use the sa_sigaction field because the handles has two additional parameters */
+	act.sa_sigaction = &hdl;
+
+	/* The SA_SIGINFO flag tells sigaction() to use the sa_sigaction field, not sa_handler. */
+	act.sa_flags = SA_SIGINFO;
+
+	if (sigaction(SIGCHLD, &act, NULL) < 0) {
+		perror ("sigaction");
+		exit(EXIT_FAILURE);
+	}
+
+	//system("reset");
+	printf( "%s", prompt );
+
 	while(TRUE){
 		/* Si la dernière commange etais un bg attendre quelque instant */
-		usleep( 20000 );
-		l = readcmd(prompt);
+
+			l = readcmd(" ");
+			usleep(20000);
+			if( l->bg == TRUE ) printf( "%s", prompt );
+			free(bgEndReport);
+			bgEndReport = NULL;
 
 		/* If input stream closed, normal termination */
 		if (!l) { printf("exit\n"); ldc_libere(&liste); exit(EXIT_SUCCESS); }
@@ -90,7 +134,7 @@ int main(){
 			create_and_exec_process(l, i);           
 		}
 	}
-return EXIT_SUCCESS;
+	return EXIT_SUCCESS;
 }
 
 
@@ -113,7 +157,8 @@ int create_and_exec_process(struct cmdline *l, int index) {
 
 	int fd;
 
-	if(strcmp(l->seq[index][0], "jobs") == 0){ ldc_affiche(&liste); return EXIT_SUCCESS;}
+
+	if(strcmp(l->seq[index][0], "jobs") == 0){ ldc_affiche(&liste); printf( "%s", prompt ); return EXIT_SUCCESS;}
 	if(strcmp(l->seq[index][0], "exit") == 0) { ldc_libere(&liste); exit(EXIT_SUCCESS);}
 
 	glob_t gl; 
@@ -132,7 +177,8 @@ int create_and_exec_process(struct cmdline *l, int index) {
 		case 0: //fils
 			if (index == 0 && l->in) {
 
-				fd = open(l->in, O_RDONLY, 0);
+				//O_RDONLY; 
+				fd = open(l->in, 0, 0);
 				if(fd == -1){ perror("open()"); return EXIT_FAILURE; }
 				dup2(fd, STDIN_FILENO);		
 
@@ -141,11 +187,16 @@ int create_and_exec_process(struct cmdline *l, int index) {
 			if (l->seq[index+1] != 0) { close(tuyau[0]); dup2(tuyau[1], STDOUT_FILENO);}
 			else if( l->out){
 
-				fd = open(l->out, O_CREAT|O_WRONLY| O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP |  S_IWGRP |S_IROTH | S_IWOTH);
+				// O_CREAT|O_WRONLY|O_TRUNC
+				//S_IRUSR | S_IWUSR | S_IRGRP |  S_IWGRP |S_IROTH | S_IWOTH
+				fd = open(l->out, 577, 438);
 				if(fd == -1){ perror("open()"); return EXIT_FAILURE; }
 				dup2(fd, STDOUT_FILENO);
 			}
+			usleep(20000);
 
+			//On attend que le proses ai bien ete ajouter a la liste  
+			//des porcess en attente s'il devais l'étre avant de lancé l'execution.
 			if ( execvp(commande[0], commande) == -1) {
 				printf("%s : commande introuvable\n", l->seq[index][0]);
 				ldc_libere(&liste);
@@ -158,18 +209,67 @@ int create_and_exec_process(struct cmdline *l, int index) {
 			sortie_prec = tuyau[0];
 
 			if (!l->bg && l->seq[index+1] == NULL){
-				if (waitpid(pid, NULL, 0) == -1) {
+
+				if (waitpid(pid, NULL, 0) == -1 && errno != EINTR) {
 					perror("wait :");
 					ldc_libere(&liste);
 					exit(EXIT_FAILURE);
 				}
-			}else if(l->bg) ldc_insere_fin(&liste, pid, l->seq[index]);
+				usleep(20000);
+				write( STDOUT_FILENO,prompt, strlen(prompt)+1);
 
-			break;
+			}else if(l->bg){ 
+				struct timeval start;
+				gettimeofday(&start,NULL);
+				ldc_insere_fin(&liste, pid, l->seq[index], start);
+				break;
+			}
+			globfree(&gl);
 	}
-	globfree(&gl);
 	return EXIT_SUCCESS;
 }
+
+
+void hdl (int sig, siginfo_t *siginfo, void *context) {
+	int status;
+	struct timeval end;
+	gettimeofday(&end,NULL);
+	char buffer[10];
+
+	struct T_cellule *cel = ldc_find( liste, siginfo->si_pid );
+
+	if( cel != NULL ){
+
+
+		cel->ended = TRUE;
+
+
+		bgEndReport = malloc( (100 + strlen(cel->cmd))*sizeof(char));
+		strcpy( bgEndReport, "\nEnded : ");
+
+		sprintf( buffer,"%d" ,cel->pid);
+		strcat( bgEndReport, buffer );
+		strcat( bgEndReport, "   " );
+		strcat( bgEndReport, cel->cmd );
+		strcat( bgEndReport, "   Exec time : " );
+
+		sprintf( buffer,"%d" ,(int)(end.tv_sec - cel->start.tv_sec));
+		strcat( bgEndReport,  buffer);
+		strcat( bgEndReport,  "s ");
+
+		sprintf( buffer,"%d" ,(int)((end.tv_usec - cel->start.tv_usec)/1000000));
+		strcat( bgEndReport, buffer );
+		strcat( bgEndReport, " ms\n" );
+		strcat( bgEndReport, prompt );
+
+		if (waitpid(cel->pid, &status, 0) == -1) { perror("waitpid"); ldc_libere(&liste); exit(EXIT_FAILURE); }
+		else cel->status = status;
+
+		write(STDOUT_FILENO, bgEndReport, strlen(bgEndReport));
+
+	}
+}
+
 
 
 //
@@ -206,82 +306,8 @@ void ldc_libere(struct T_cellule **pl) {
 	*pl = ldc_cree();
 }
 
-void ldc_affiche( struct T_cellule **pl ){
-	int status, size;
-	pid_t out;
-	char state[9];
-	struct T_cellule *liste_cour = *pl;
-
-	size = ldc_taille(*pl);
-	for( int i=1; i<= size; i++){
-		if( i == 1 ) printf("   No     PID    STATE   CMD\n");
-
-		out=waitpid(liste_cour->pid, &status, WNOHANG);
-
-		if( out == -1){ perror("waitpid"); ldc_libere(pl); exit(EXIT_FAILURE); }
-		else if( out == 0 ){
-			strcpy(state, "Runing");
-			// Le proc est en cour et non interrompu : on l'affiche
-
-			printf("%5d%8d%9s   %s &\n",i, liste_cour->pid,state, liste_cour->cmd);
-
-			liste_cour = liste_cour->suiv;
-		}else{
-			if (WIFEXITED(status)) strcpy(state, "End");
-			else if (WIFSIGNALED(status)) strcpy(state, "Error");
-			else if (WIFSTOPPED(status)) strcpy(state, "Stoped");
-
-			printf("%5d%8d%9s   %s\n",i, liste_cour->pid,state, liste_cour->cmd);
-
-			//On suprime le pocessus.
-			liste_cour = liste_cour->suiv;
-			ldc_supprime( pl, liste_cour->prec);
-		}
-	}
-}
 
 
-void ldc_insere_fin( struct T_cellule **pliste, pid_t pid, char **cmd) {
-	int length = 0;
-	for( int i=0; cmd[i] != NULL; i++){
-		length += strlen(cmd[i]) + 1;
-	}
-	if (ldc_taille(*pliste) == 0 ) {
-		*pliste = malloc(sizeof(struct T_cellule));
-
-		(*pliste)->cmd = malloc( length*sizeof(char)+1);
-
-		strcpy((*pliste)->cmd, cmd[0]);
-		for( int i=1; cmd[i] != NULL; i++){
-			strcat((*pliste)->cmd," "); 
-			strcat((*pliste)->cmd,cmd[i]); 
-		}
-
-		(*pliste)->pid = pid;
-		(*pliste)->prec = *pliste;
-		(*pliste)->suiv = *pliste;
-
-	} else {
-		struct T_cellule *pcel = malloc(sizeof(struct T_cellule));
-
-		pcel->cmd = malloc( length*sizeof(char)+1);
-
-		strcpy(pcel->cmd, cmd[0]);
-		for( int i=1; cmd[i] != NULL; i++){
-			strcat(pcel->cmd," "); 
-			strcat(pcel->cmd,cmd[i]); 
-		}
-
-		pcel->pid = pid;
-
-		pcel->suiv = *pliste;
-		pcel->prec = (*pliste)->prec;
-
-		(*pliste)->prec->suiv = pcel;
-		(*pliste)->prec = pcel;
-
-	}
-}
 
 void ldc_supprime( struct T_cellule **pl, struct T_cellule *ele) {
 	if (ldc_taille(*(pl)) == 1) {
@@ -310,3 +336,98 @@ void ldc_afficheDebug( struct T_cellule *liste )
 	printf("----------------\n");
 	printf("\n");
 }
+
+
+void ldc_affiche( struct T_cellule **pl ){
+	int size;
+	char state[9];
+	struct T_cellule *liste_cour = *pl;
+
+	size = ldc_taille(*pl);
+	for( int i=1; i<= size; i++){
+		if( i == 1 ) printf("   No     PID    STATE   CMD\n");
+
+		if( !liste_cour->ended ){
+			strcpy(state, "Runing");
+			// Le proc est en cour et non interrompu : on l'affiche
+
+			printf("%5d%8d%9s   %s &\n",i, liste_cour->pid,state, liste_cour->cmd);
+
+			liste_cour = liste_cour->suiv;
+		}else{
+			if (WIFEXITED(liste_cour->status)) strcpy(state, "End");
+			else if (WIFSIGNALED(liste_cour->status)) strcpy(state, "Error");
+			else if (WIFSTOPPED(liste_cour->status)) strcpy(state, "Stoped");
+
+			printf("%5d%8d%9s   %s\n",i, liste_cour->pid,state, liste_cour->cmd);
+
+			//On suprime le pocessus.
+			liste_cour = liste_cour->suiv;
+			ldc_supprime( pl, liste_cour->prec);
+		}
+	}
+}
+
+
+void ldc_insere_fin( struct T_cellule **pliste, pid_t pid, char **cmd, struct timeval start) {
+	int length = 0;
+	for( int i=0; cmd[i] != NULL; i++){
+		length += strlen(cmd[i]) + 1;
+	}
+	if (ldc_taille(*pliste) == 0 ) {
+		*pliste = malloc(sizeof(struct T_cellule));
+
+		(*pliste)->cmd = malloc( length*sizeof(char)+1);
+
+		strcpy((*pliste)->cmd, cmd[0]);
+		for( int i=1; cmd[i] != NULL; i++){
+			strcat((*pliste)->cmd," "); 
+			strcat((*pliste)->cmd,cmd[i]); 
+		}
+
+		(*pliste)->start = start;
+		(*pliste)->ended = 0;
+
+		(*pliste)->pid = pid;
+		(*pliste)->prec = *pliste;
+		(*pliste)->suiv = *pliste;
+
+	} else {
+		struct T_cellule *pcel = malloc(sizeof(struct T_cellule));
+
+		pcel->cmd = malloc( length*sizeof(char)+1);
+
+		strcpy(pcel->cmd, cmd[0]);
+		for( int i=1; cmd[i] != NULL; i++){
+			strcat(pcel->cmd," "); 
+			strcat(pcel->cmd,cmd[i]); 
+		}
+
+		pcel->start = start;
+		pcel->ended = 0;
+
+		pcel->pid = pid;
+
+		pcel->suiv = *pliste;
+		pcel->prec = (*pliste)->prec;
+
+		(*pliste)->prec->suiv = pcel;
+		(*pliste)->prec = pcel;
+
+	}
+}
+
+struct T_cellule *ldc_find( struct T_cellule *pl, pid_t pid){
+
+	if (ldc_taille(liste) == 0) return NULL; 
+	else{
+		struct T_cellule *liste_cour = liste;
+		do {
+			if( pid == liste_cour->pid ) return liste_cour;
+
+			liste_cour = liste_cour->suiv;
+		}while (liste_cour != liste);
+	}
+	return NULL;
+}
+

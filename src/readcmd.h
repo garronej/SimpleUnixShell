@@ -31,6 +31,7 @@ struct cmdline {
 	char ***seq;	/* See comment below */
 };
 
+
 /* Field seq of struct cmdline :
 A command line is a sequence of commands whose output is linked to the input
 of the next command by a pipe. To describe such a structure :
